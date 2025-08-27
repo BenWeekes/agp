@@ -192,18 +192,46 @@ func (p *ParentController) readChildMessages() {
 func (p *ParentController) handleChildMessage(msgBuf []byte) {
 	msg := ipcgen.GetRootAsIPCMessage(msgBuf, 0)
 	
-	p.logger.Printf("Received message type: %s, payload length: %d", 
-		ipcgen.EnumNamesMessageType[msg.MessageType()], msg.PayloadLength())
-	
 	switch msg.MessageType() {
 	case ipcgen.MessageTypeSTATUS_RESPONSE:
-		p.logger.Printf("Status response received (not parsed yet)")
-		p.mu.Lock()
-		p.isConnected = true
-		p.mu.Unlock()
+		// Get payload bytes
+		payloadLen := msg.PayloadLength()
+		if payloadLen > 0 {
+			payloadBytes := make([]byte, payloadLen)
+			for i := 0; i < payloadLen; i++ {
+				payloadBytes[i] = byte(msg.Payload(i))
+			}
+			
+			// Parse StatusResponsePayload
+			status := ipcgen.GetRootAsStatusResponsePayload(payloadBytes, 0)
+			p.logger.Printf("Status: %s, Message: %s, Info: %s",
+				ipcgen.EnumNamesConnectionStatus[status.Status()],
+				string(status.ErrorMessage()),
+				string(status.AdditionalInfo()))
+			
+			// Update connection state based on status
+			if status.Status() == ipcgen.ConnectionStatusCONNECTED {
+				p.mu.Lock()
+				p.isConnected = true
+				p.mu.Unlock()
+			}
+		}
 		
 	case ipcgen.MessageTypeLOG_RESPONSE:
-		p.logger.Printf("Log response received (not parsed yet)")
+		// Get payload bytes
+		payloadLen := msg.PayloadLength()
+		if payloadLen > 0 {
+			payloadBytes := make([]byte, payloadLen)
+			for i := 0; i < payloadLen; i++ {
+				payloadBytes[i] = byte(msg.Payload(i))
+			}
+			
+			// Parse LogResponsePayload
+			logMsg := ipcgen.GetRootAsLogResponsePayload(payloadBytes, 0)
+			p.logger.Printf("[child-%s] %s",
+				ipcgen.EnumNamesLogLevel[logMsg.Level()],
+				string(logMsg.Message()))
+		}
 		
 	default:
 		p.logger.Printf("Received unexpected message type from child: %s", 
@@ -231,64 +259,100 @@ func (p *ParentController) sendMessage(msgBytes []byte) error {
 }
 
 func (p *ParentController) SendVideoFrame(data []byte, timestampNano int64) error {
-	builder := flatbuffers.NewBuilder(len(data) + 64)
-
-	// Create data vector
-	ipcgen.MediaSamplePayloadStartDataVector(builder, len(data))
+	// First create the MediaSamplePayload
+	innerBuilder := flatbuffers.NewBuilder(len(data) + 64)
+	
+	// Create data vector for MediaSamplePayload
+	ipcgen.MediaSamplePayloadStartDataVector(innerBuilder, len(data))
 	for i := len(data) - 1; i >= 0; i-- {
-		builder.PrependByte(data[i])
+		innerBuilder.PrependByte(data[i])
 	}
-	dataOffset := builder.EndVector(len(data))
-
+	dataOffset := innerBuilder.EndVector(len(data))
+	
 	// Create MediaSamplePayload
-	ipcgen.MediaSamplePayloadStart(builder)
-	ipcgen.MediaSamplePayloadAddData(builder, dataOffset)
-	ipcgen.MediaSamplePayloadAddTimestampUnixNano(builder, timestampNano)
-	payloadOffset := ipcgen.MediaSamplePayloadEnd(builder)
-
+	ipcgen.MediaSamplePayloadStart(innerBuilder)
+	ipcgen.MediaSamplePayloadAddData(innerBuilder, dataOffset)
+	ipcgen.MediaSamplePayloadAddTimestampUnixNano(innerBuilder, timestampNano)
+	mediaSampleOffset := ipcgen.MediaSamplePayloadEnd(innerBuilder)
+	innerBuilder.Finish(mediaSampleOffset)
+	
+	// Get the serialized MediaSamplePayload bytes
+	mediaSampleBytes := innerBuilder.FinishedBytes()
+	
+	// Now create the outer IPCMessage with the MediaSamplePayload bytes as payload
+	outerBuilder := flatbuffers.NewBuilder(len(mediaSampleBytes) + 64)
+	
+	// Create payload vector for IPCMessage
+	ipcgen.IPCMessageStartPayloadVector(outerBuilder, len(mediaSampleBytes))
+	for i := len(mediaSampleBytes) - 1; i >= 0; i-- {
+		outerBuilder.PrependByte(mediaSampleBytes[i])
+	}
+	payloadOffset := outerBuilder.EndVector(len(mediaSampleBytes))
+	
 	// Create IPCMessage
-	ipcgen.IPCMessageStart(builder)
-	ipcgen.IPCMessageAddMessageType(builder, ipcgen.MessageTypeWRITE_VIDEO_SAMPLE_COMMAND)
-	ipcgen.IPCMessageAddPayloadType(builder, ipcgen.MessagePayloadMediaSample)
-	ipcgen.IPCMessageAddPayload(builder, payloadOffset)
-	msg := ipcgen.IPCMessageEnd(builder)
-	builder.Finish(msg)
-
-	return p.sendMessage(builder.FinishedBytes())
+	ipcgen.IPCMessageStart(outerBuilder)
+	ipcgen.IPCMessageAddMessageType(outerBuilder, ipcgen.MessageTypeWRITE_VIDEO_SAMPLE_COMMAND)
+	ipcgen.IPCMessageAddPayloadType(outerBuilder, ipcgen.MessagePayloadMediaSample)
+	ipcgen.IPCMessageAddPayload(outerBuilder, payloadOffset)
+	msg := ipcgen.IPCMessageEnd(outerBuilder)
+	outerBuilder.Finish(msg)
+	
+	return p.sendMessage(outerBuilder.FinishedBytes())
 }
 
 func (p *ParentController) SendAudioFrame(data []byte, timestampNano int64) error {
-	builder := flatbuffers.NewBuilder(len(data) + 64)
-
-	// Create data vector
-	ipcgen.MediaSamplePayloadStartDataVector(builder, len(data))
+	// First create the MediaSamplePayload
+	innerBuilder := flatbuffers.NewBuilder(len(data) + 64)
+	
+	// Create data vector for MediaSamplePayload
+	ipcgen.MediaSamplePayloadStartDataVector(innerBuilder, len(data))
 	for i := len(data) - 1; i >= 0; i-- {
-		builder.PrependByte(data[i])
+		innerBuilder.PrependByte(data[i])
 	}
-	dataOffset := builder.EndVector(len(data))
-
+	dataOffset := innerBuilder.EndVector(len(data))
+	
 	// Create MediaSamplePayload
-	ipcgen.MediaSamplePayloadStart(builder)
-	ipcgen.MediaSamplePayloadAddData(builder, dataOffset)
-	ipcgen.MediaSamplePayloadAddTimestampUnixNano(builder, timestampNano)
-	payloadOffset := ipcgen.MediaSamplePayloadEnd(builder)
-
+	ipcgen.MediaSamplePayloadStart(innerBuilder)
+	ipcgen.MediaSamplePayloadAddData(innerBuilder, dataOffset)
+	ipcgen.MediaSamplePayloadAddTimestampUnixNano(innerBuilder, timestampNano)
+	mediaSampleOffset := ipcgen.MediaSamplePayloadEnd(innerBuilder)
+	innerBuilder.Finish(mediaSampleOffset)
+	
+	// Get the serialized MediaSamplePayload bytes
+	mediaSampleBytes := innerBuilder.FinishedBytes()
+	
+	// Now create the outer IPCMessage with the MediaSamplePayload bytes as payload
+	outerBuilder := flatbuffers.NewBuilder(len(mediaSampleBytes) + 64)
+	
+	// Create payload vector for IPCMessage
+	ipcgen.IPCMessageStartPayloadVector(outerBuilder, len(mediaSampleBytes))
+	for i := len(mediaSampleBytes) - 1; i >= 0; i-- {
+		outerBuilder.PrependByte(mediaSampleBytes[i])
+	}
+	payloadOffset := outerBuilder.EndVector(len(mediaSampleBytes))
+	
 	// Create IPCMessage
-	ipcgen.IPCMessageStart(builder)
-	ipcgen.IPCMessageAddMessageType(builder, ipcgen.MessageTypeWRITE_AUDIO_SAMPLE_COMMAND)
-	ipcgen.IPCMessageAddPayloadType(builder, ipcgen.MessagePayloadMediaSample)
-	ipcgen.IPCMessageAddPayload(builder, payloadOffset)
-	msg := ipcgen.IPCMessageEnd(builder)
-	builder.Finish(msg)
-
-	return p.sendMessage(builder.FinishedBytes())
+	ipcgen.IPCMessageStart(outerBuilder)
+	ipcgen.IPCMessageAddMessageType(outerBuilder, ipcgen.MessageTypeWRITE_AUDIO_SAMPLE_COMMAND)
+	ipcgen.IPCMessageAddPayloadType(outerBuilder, ipcgen.MessagePayloadMediaSample)
+	ipcgen.IPCMessageAddPayload(outerBuilder, payloadOffset)
+	msg := ipcgen.IPCMessageEnd(outerBuilder)
+	outerBuilder.Finish(msg)
+	
+	return p.sendMessage(outerBuilder.FinishedBytes())
 }
 
 func (p *ParentController) SendCloseCommand() error {
 	builder := flatbuffers.NewBuilder(64)
 
+	// Create empty payload vector
+	ipcgen.IPCMessageStartPayloadVector(builder, 0)
+	payloadOffset := builder.EndVector(0)
+
 	ipcgen.IPCMessageStart(builder)
 	ipcgen.IPCMessageAddMessageType(builder, ipcgen.MessageTypeCLOSE_COMMAND)
+	ipcgen.IPCMessageAddPayloadType(builder, ipcgen.MessagePayloadNONE)
+	ipcgen.IPCMessageAddPayload(builder, payloadOffset)
 	msg := ipcgen.IPCMessageEnd(builder)
 	builder.Finish(msg)
 
@@ -347,7 +411,7 @@ func (p *ParentController) StreamAudio(stopChan <-chan struct{}) {
 
 	// Calculate frame size for 10ms of audio (PCM16)
 	samplesPerFrame := p.sampleRate / 100 // 10ms
-	frameSize := 320 // Small test frame // 2 bytes per sample for PCM16
+	frameSize := samplesPerFrame * p.audioChannels * 2 // 2 bytes per sample for PCM16
 	frameBuf := make([]byte, frameSize)
 
 	// Calculate frame interval (10ms)
@@ -398,7 +462,7 @@ func (p *ParentController) StreamAudio(stopChan <-chan struct{}) {
 
 			frameCount++
 			if frameCount%100 == 0 { // Log every second
-				p.logger.Printf("Sent %d audio frames", frameCount)
+				p.logger.Printf("Sent %d audio frames (%.2f seconds)", frameCount, float64(frameCount)/100.0)
 			}
 		}
 	}
@@ -415,7 +479,9 @@ func (p *ParentController) StreamVideo(stopChan <-chan struct{}) {
 	defer file.Close()
 
 	// Calculate frame size for YUV420
-	frameSize := 1024 // Small test frame
+	ySize := p.videoWidth * p.videoHeight
+	uvSize := ySize / 4
+	frameSize := ySize + 2*uvSize // Y + U + V planes
 	frameBuf := make([]byte, frameSize)
 
 	// Calculate frame interval
@@ -466,7 +532,7 @@ func (p *ParentController) StreamVideo(stopChan <-chan struct{}) {
 
 			frameCount++
 			if frameCount%(p.frameRate) == 0 { // Log every second
-				p.logger.Printf("Sent %d video frames", frameCount)
+				p.logger.Printf("Sent %d video frames (%.2f seconds)", frameCount, float64(frameCount)/float64(p.frameRate))
 			}
 		}
 	}

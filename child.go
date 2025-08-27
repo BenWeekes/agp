@@ -335,8 +335,16 @@ func main() {
 		// Get payload data as bytes
 		payloadLen := ipcMsg.PayloadLength()
 		if payloadLen == 0 && ipcMsg.MessageType() != ipcgen.MessageTypeCLOSE_COMMAND {
-			childLogger.Printf("Failed to get payload for message type: %s", ipcgen.EnumNamesMessageType[ipcMsg.MessageType()])
-			sendErrorResponse(ipcgen.ConnectionStatusFAILED, "Failed to get payload from IPCMessage", "")
+			childLogger.Printf("No payload for message type: %s", ipcgen.EnumNamesMessageType[ipcMsg.MessageType()])
+			// Some messages like CLOSE_COMMAND don't have payload
+			if ipcMsg.MessageType() == ipcgen.MessageTypeCLOSE_COMMAND {
+				childLogger.Println("Received Close command. Cleaning up and exiting.")
+				cleanupAgoraResources()
+				sendAsyncLogResponse(ipcgen.LogLevelINFO, "Child process shutting down.")
+				sendAsyncStatusResponse(ipcgen.ConnectionStatusDISCONNECTED, "", "Closed by parent command")
+				childLogger.Println("Child process terminated by close command.")
+				return
+			}
 			continue
 		}
 		
@@ -355,13 +363,15 @@ func main() {
 			
 			// Parse MediaSamplePayload from payload bytes
 			samplePayload := ipcgen.GetRootAsMediaSamplePayload(payloadBytes, 0)
-			if samplePayload.DataLength() == 0 {
+			dataLen := samplePayload.DataLength()
+			if dataLen == 0 {
+				childLogger.Println("WARN: Received empty video sample data.")
 				continue
 			}
 			
 			// Extract frame data
-			frameData := make([]byte, samplePayload.DataLength())
-			for i := 0; i < int(samplePayload.DataLength()); i++ {
+			frameData := make([]byte, dataLen)
+			for i := 0; i < int(dataLen); i++ {
 				frameData[i] = byte(samplePayload.Data(i))
 			}
 
@@ -379,19 +389,21 @@ func main() {
 
 		case ipcgen.MessageTypeWRITE_AUDIO_SAMPLE_COMMAND:
 			if rtcConnection == nil || audioSender == nil {
+				childLogger.Println("WARN: Audio sample received but Agora rtcConnection/audio sender not ready. Dropping.")
 				continue
 			}
 			
 			// Parse MediaSamplePayload from payload bytes
 			samplePayload := ipcgen.GetRootAsMediaSamplePayload(payloadBytes, 0)
-			if samplePayload.DataLength() == 0 {
+			dataLen := samplePayload.DataLength()
+			if dataLen == 0 {
 				childLogger.Println("WARN: Received empty audio sample data.")
 				continue
 			}
 			
 			// Extract frame data
-			frameData := make([]byte, samplePayload.DataLength())
-			for i := 0; i < int(samplePayload.DataLength()); i++ {
+			frameData := make([]byte, dataLen)
+			for i := 0; i < int(dataLen); i++ {
 				frameData[i] = byte(samplePayload.Data(i))
 			}
 
@@ -542,24 +554,40 @@ func sendAsyncStatusResponse(status ipcgen.ConnectionStatus, message string, det
 	stdoutLock.Lock()
 	defer stdoutLock.Unlock()
 
-	builder := flatbuffers.NewBuilder(1024)
-	msgStr := builder.CreateString(message)
-	detailsStr := builder.CreateString(details)
+	// First create the StatusResponsePayload
+	innerBuilder := flatbuffers.NewBuilder(1024)
+	msgStr := innerBuilder.CreateString(message)
+	detailsStr := innerBuilder.CreateString(details)
 
-	ipcgen.StatusResponsePayloadStart(builder)
-	ipcgen.StatusResponsePayloadAddStatus(builder, status)
-	ipcgen.StatusResponsePayloadAddErrorMessage(builder, msgStr)
-	ipcgen.StatusResponsePayloadAddAdditionalInfo(builder, detailsStr)
-	payloadOffset := ipcgen.StatusResponsePayloadEnd(builder)
+	ipcgen.StatusResponsePayloadStart(innerBuilder)
+	ipcgen.StatusResponsePayloadAddStatus(innerBuilder, status)
+	ipcgen.StatusResponsePayloadAddErrorMessage(innerBuilder, msgStr)
+	ipcgen.StatusResponsePayloadAddAdditionalInfo(innerBuilder, detailsStr)
+	statusPayloadOffset := ipcgen.StatusResponsePayloadEnd(innerBuilder)
+	innerBuilder.Finish(statusPayloadOffset)
+	
+	// Get the serialized StatusResponsePayload bytes
+	statusPayloadBytes := innerBuilder.FinishedBytes()
+	
+	// Now create the outer IPCMessage with the StatusResponsePayload bytes as payload
+	outerBuilder := flatbuffers.NewBuilder(len(statusPayloadBytes) + 64)
+	
+	// Create payload vector for IPCMessage
+	ipcgen.IPCMessageStartPayloadVector(outerBuilder, len(statusPayloadBytes))
+	for i := len(statusPayloadBytes) - 1; i >= 0; i-- {
+		outerBuilder.PrependByte(statusPayloadBytes[i])
+	}
+	payloadOffset := outerBuilder.EndVector(len(statusPayloadBytes))
+	
+	// Create IPCMessage
+	ipcgen.IPCMessageStart(outerBuilder)
+	ipcgen.IPCMessageAddMessageType(outerBuilder, ipcgen.MessageTypeSTATUS_RESPONSE)
+	ipcgen.IPCMessageAddPayloadType(outerBuilder, ipcgen.MessagePayloadStatus)
+	ipcgen.IPCMessageAddPayload(outerBuilder, payloadOffset)
+	msg := ipcgen.IPCMessageEnd(outerBuilder)
+	outerBuilder.Finish(msg)
 
-	ipcgen.IPCMessageStart(builder)
-	ipcgen.IPCMessageAddMessageType(builder, ipcgen.MessageTypeSTATUS_RESPONSE)
-	ipcgen.IPCMessageAddPayloadType(builder, ipcgen.MessagePayloadStatus)
-	ipcgen.IPCMessageAddPayload(builder, payloadOffset)
-	msg := ipcgen.IPCMessageEnd(builder)
-	builder.Finish(msg)
-
-	buf := builder.FinishedBytes()
+	buf := outerBuilder.FinishedBytes()
 	sendFramedMessage(stdoutWriter, buf)
 	if err := stdoutWriter.Flush(); err != nil {
 		childLogger.Printf("ERROR flushing stdout after status response: %v", err)
@@ -574,22 +602,38 @@ func sendAsyncLogResponse(level ipcgen.LogLevel, messageStr string) {
 	stdoutLock.Lock()
 	defer stdoutLock.Unlock()
 
-	builder := flatbuffers.NewBuilder(1024)
-	msgStr := builder.CreateString(messageStr)
+	// First create the LogResponsePayload
+	innerBuilder := flatbuffers.NewBuilder(1024)
+	msgStr := innerBuilder.CreateString(messageStr)
 
-	ipcgen.LogResponsePayloadStart(builder)
-	ipcgen.LogResponsePayloadAddLevel(builder, level)
-	ipcgen.LogResponsePayloadAddMessage(builder, msgStr)
-	payloadOffset := ipcgen.LogResponsePayloadEnd(builder)
+	ipcgen.LogResponsePayloadStart(innerBuilder)
+	ipcgen.LogResponsePayloadAddLevel(innerBuilder, level)
+	ipcgen.LogResponsePayloadAddMessage(innerBuilder, msgStr)
+	logPayloadOffset := ipcgen.LogResponsePayloadEnd(innerBuilder)
+	innerBuilder.Finish(logPayloadOffset)
+	
+	// Get the serialized LogResponsePayload bytes
+	logPayloadBytes := innerBuilder.FinishedBytes()
+	
+	// Now create the outer IPCMessage with the LogResponsePayload bytes as payload
+	outerBuilder := flatbuffers.NewBuilder(len(logPayloadBytes) + 64)
+	
+	// Create payload vector for IPCMessage
+	ipcgen.IPCMessageStartPayloadVector(outerBuilder, len(logPayloadBytes))
+	for i := len(logPayloadBytes) - 1; i >= 0; i-- {
+		outerBuilder.PrependByte(logPayloadBytes[i])
+	}
+	payloadOffset := outerBuilder.EndVector(len(logPayloadBytes))
+	
+	// Create IPCMessage
+	ipcgen.IPCMessageStart(outerBuilder)
+	ipcgen.IPCMessageAddMessageType(outerBuilder, ipcgen.MessageTypeLOG_RESPONSE)
+	ipcgen.IPCMessageAddPayloadType(outerBuilder, ipcgen.MessagePayloadLog)
+	ipcgen.IPCMessageAddPayload(outerBuilder, payloadOffset)
+	msg := ipcgen.IPCMessageEnd(outerBuilder)
+	outerBuilder.Finish(msg)
 
-	ipcgen.IPCMessageStart(builder)
-	ipcgen.IPCMessageAddMessageType(builder, ipcgen.MessageTypeLOG_RESPONSE)
-	ipcgen.IPCMessageAddPayloadType(builder, ipcgen.MessagePayloadLog)
-	ipcgen.IPCMessageAddPayload(builder, payloadOffset)
-	msg := ipcgen.IPCMessageEnd(builder)
-	builder.Finish(msg)
-
-	buf := builder.FinishedBytes()
+	buf := outerBuilder.FinishedBytes()
 	sendFramedMessage(stdoutWriter, buf)
 	if err := stdoutWriter.Flush(); err != nil {
 		childLogger.Printf("ERROR flushing stdout after log response: %v", err)
