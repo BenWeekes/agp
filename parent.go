@@ -72,6 +72,7 @@ type Options struct {
 	VideoCodec     string
 	VideoBitrate   int
 	MinVideoBitrate int
+	EnableStringUID bool
 }
 
 func (p *ParentController) Start(opts *Options) error {
@@ -91,6 +92,7 @@ func (p *ParentController) Start(opts *Options) error {
 		"-audioChannels", fmt.Sprintf("%d", opts.AudioChannels),
 		"-bitrate", fmt.Sprintf("%d", opts.VideoBitrate),
 		"-minBitrate", fmt.Sprintf("%d", opts.MinVideoBitrate),
+		"-enableStringUID", fmt.Sprintf("%t", opts.EnableStringUID),
 	}
 
 	p.cmd = exec.Command("./child", args...)
@@ -556,6 +558,7 @@ func main() {
 	flag.StringVar(&opts.VideoCodec, "videoCodec", "H264", "Video codec (H264 or VP8)")
 	flag.IntVar(&opts.VideoBitrate, "bitrate", 1000, "Video target bitrate in Kbps")
 	flag.IntVar(&opts.MinVideoBitrate, "minBitrate", 100, "Video minimum bitrate in Kbps")
+	flag.BoolVar(&opts.EnableStringUID, "enableStringUID", false, "Enable string UID support in Agora SDK")
 
 	flag.Parse()
 

@@ -192,6 +192,7 @@ func main() {
 	audioChannelsFlag := flag.Int("audioChannels", 1, "Audio channels")
 	bitrateFlag := flag.Int("bitrate", 1000, "Video target bitrate in Kbps")
 	minBitrateFlag := flag.Int("minBitrate", 100, "Video minimum bitrate in Kbps")
+	enableStringUIDFlag := flag.Bool("enableStringUID", false, "Enable string UID support")
 
 	flag.Parse()
 
@@ -206,14 +207,16 @@ func main() {
 	initAudioChannels = int32(*audioChannelsFlag)
 	initBitrate = *bitrateFlag
 	initMinBitrate = *minBitrateFlag
+	enableStringUID := *enableStringUIDFlag
 
-	childLogger.Printf("Initial parameters from command line: AppID=%s, Channel=%s, UserID=%s, Codec=%s, Res=%dx%d@%d, Bitrate=%dKbps, MinBitrate=%dKbps, AudioSR=%d, AudioCh=%d",
-		globalAppID, globalChannel, globalUserID, *videoCodecFlag, initWidth, initHeight, initFrameRate, initBitrate, initMinBitrate, initSampleRate, initAudioChannels)
+	childLogger.Printf("Initial parameters from command line: AppID=%s, Channel=%s, UserID=%s, Codec=%s, Res=%dx%d@%d, Bitrate=%dKbps, MinBitrate=%dKbps, AudioSR=%d, AudioCh=%d, StringUID=%t",
+		globalAppID, globalChannel, globalUserID, *videoCodecFlag, initWidth, initHeight, initFrameRate, initBitrate, initMinBitrate, initSampleRate, initAudioChannels, enableStringUID)
 
 	serviceCfg := agoraservice.NewAgoraServiceConfig()
 	serviceCfg.EnableAudioProcessor = true
 	serviceCfg.EnableVideo = true
 	serviceCfg.AppId = globalAppID
+	serviceCfg.UseStringUid = enableStringUID
 	serviceCfg.LogPath = "./agora_child_sdk.log"
 	serviceCfg.LogSize = 5 * 1024 * 1024
 
